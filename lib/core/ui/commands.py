@@ -1,0 +1,993 @@
+# This file is part of Viper - https://github.com/viper-framework/viper
+# See the file 'LICENSE' for copying permission.
+
+import argparse
+import os
+import time
+import fnmatch
+import tempfile
+import shutil
+from zipfile import ZipFile
+from collections import defaultdict
+
+try:
+    from scandir import walk
+except ImportError:
+    from os import walk
+
+from lib.common.out import *
+from lib.common.utils import convert_size
+from lib.common.objects import File
+from lib.common.network import download
+from lib.core.session import __sessions__
+from lib.core.investigation import __project__
+from lib.core.plugins import __modules__, __integrations__, __scripts__
+from lib.core.database import Database
+from lib.core.storage import store_sample, get_sample_path
+
+# For python2 & 3 compat, a bit dirty, but it seems to be the least bad one
+try:
+        input = raw_input
+except NameError:
+        pass
+
+
+class Commands(object):
+
+    output = []
+    
+    def __init__(self):
+        # Open connection to the database.
+        self.db = Database()
+
+        # Map commands to their related functions.
+        self.commands = dict(
+            help=dict(obj=self.cmd_help, description="Show this help message"),
+            open=dict(obj=self.cmd_open, description="Open a file"),
+            new=dict(obj=self.cmd_new, description="Create new file"),
+            close=dict(obj=self.cmd_close, description="Close the current session"),
+            info=dict(obj=self.cmd_info, description="Show information on the opened file"),
+            notes=dict(obj=self.cmd_notes, description="View, add and edit notes in the current investigation"),
+            clear=dict(obj=self.cmd_clear, description="Clear the console"),
+            store=dict(obj=self.cmd_store, description="Store the opened file to the local repository"),
+            delete=dict(obj=self.cmd_delete, description="Delete the opened file"),
+            find=dict(obj=self.cmd_find, description="Find a file"),
+            tags=dict(obj=self.cmd_tags, description="Modify tags of the opened file"),
+            sessions=dict(obj=self.cmd_sessions, description="List or switch sessions"),
+            stats=dict(obj=self.cmd_stats, description="Collection Statistics"),
+            investigations=dict(obj=self.cmd_investigations, description="List or switch current investigations"),
+            export=dict(obj=self.cmd_export, description="Export the current session to file or zip"),
+            modules=dict(obj=self.cmd_modules, description="List available modules"),
+            integrate=dict(obj=self.cmd_integrate, description="Interact with available integrations"),
+            tokens=dict(obj=self.cmd_tokens, description="Store and retrieve API tokens for integrations and modules"),
+        )
+        
+    # Output Logging
+    def log(self, event_type, event_data):
+        self.output.append(dict(
+            type=event_type,
+            data=event_data
+        ))
+        
+    ##
+    # CLEAR
+    #
+    # This command simply clears the shell.
+    def cmd_clear(self, *args):
+        os.system('clear')
+
+    ##
+    # HELP
+    #
+    # This command simply prints the help message.
+    # It lists both embedded commands and loaded modules.
+    def cmd_help(self, *args):
+        self.log('info', "Commands")
+
+        # Build table of commands from commands dict above
+        rows = []
+        for command_name, command_item in self.commands.items():
+            rows.append([command_name, command_item['description']])
+
+        rows.append(["exit, quit", "Quit CIRTKit"])
+        rows = sorted(rows, key=lambda entry: entry[0])
+
+        self.log('table', dict(header=['Command', 'Description'], rows=rows))
+
+    ##
+    # MODULES
+    #
+    # Lists all modules discovered in the modules directory
+    # and lists them by package name, by enumerating
+    # over the directory we can rerun dynamically
+    def cmd_modules(self, *args):
+
+        parser = argparse.ArgumentParser(prog='modules', description="Lists modules", epilog="You can also specify -r to dynamically pickup new modules")
+        parser.add_argument('-r', '--reload', action='store_true', help="Reload modules")
+
+        moduleDict = __modules__
+
+        try:
+            args = parser.parse_args(args)
+        except:
+            return
+
+        if args.reload:
+            from lib.core.plugins import load_modules
+            moduleDict = load_modules()
+
+        rows = []
+        for module_name, module_item in moduleDict.items():
+            rows.append([module_name, module_item['description']])
+
+        rows = sorted(rows, key=lambda entry: entry[0])
+
+        # Build table of modules from the modules available
+        self.log('info', "Modules")
+        self.log('table', dict(header=['Command', 'Description'], rows=rows))
+
+    ##
+    # INTEGRATIONS
+    #
+    # Lists all integrations available
+    def cmd_integrate(self, *args):
+
+        parser = argparse.ArgumentParser(prog='integrate', description="Load integrations")
+        parser.add_argument('-n', '--name', type=str, nargs=1, help="Load integration by name")
+        parser.add_argument('-a', '--all', action='store_true', help="List all available integrations")
+
+        integrateDict = __integrations__
+
+        try:
+            args = parser.parse_args(args)
+        except:
+            return
+
+        rows = []
+        for name, desc in integrateDict.items():
+            rows.append([name, desc['description']])
+
+        if args.all:
+            rows = sorted(rows, key=lambda entry: entry[0])
+
+            # Build table of integrations
+            self.log('info', "Integrations")
+            self.log('table', dict(header=['Name', 'Description'], rows=rows))
+
+        elif args.name:
+            name = args.name[0]
+            item = integrateDict[args.name[0]]['obj']()
+            print_info("Loading {0}\n".format(name))
+            item.load()
+
+        else:
+            parser.print_help()
+
+    ##
+    # TOKENS
+    #
+    # Store and retrieve tokens for app integrations
+    # and for other modules used in cirtkit
+    def cmd_tokens(self, *args):
+
+        parser = argparse.ArgumentParser(prog='tokens', description="Store and retrieve API tokens")
+        parser.add_argument('-d', '--delete', type=int, metavar="Token_ID", nargs=1, help="Delete token by ID")
+        parser.add_argument('-a', '--add', action='store_true', help="Add a new API token")
+        parser.add_argument('-l', '--list', action='store_true', help="List all configured API tokens")
+
+        try:
+            args = parser.parse_args(args)
+        except:
+            return
+
+        if args.delete:
+            tokenid = args.delete
+            self.db.delete_token(tokenid)
+            print_success("Token {0} deleted successfully!".format(tokenid))
+        elif args.add:
+            print_info("Application new token will be used for:")
+            appname = input("> ")
+            print_info("API Token:")
+            apitoken = input("> ")
+            print_info("Username (if applicable):")
+            username = input("> ")
+            print_info("FQDN of remote server (format: ex.server.com:8000):")
+            hostname = input("> ")
+            if len(username) == 0:
+                username = ""
+
+            self.db.add_token(apitoken, username, appname, hostname)
+            print_success("Token for {0} added successfully!".format(appname))
+
+        elif args.list:
+            # Populate the list of search results.
+            items = self.db.get_token_list()
+            rows = []
+            for item in items:
+                row = [item.id, item.app, item.user, item.fqdn]
+                rows.append(row)
+
+            if len(rows) < 1:
+                print_info("No token profiles configured")
+                return
+
+            # Generate a table with the results.
+            header = ['#', 'App', 'User', 'FQDN']
+            self.log("table", dict(header=header, rows=rows))
+
+        else:
+            parser.print_help()
+
+
+    ##
+    # NEW
+    #
+    # This command is used to create a new session on a new file,
+    # useful for copy & paste of content like Email headers
+
+    def cmd_new(self, *args):
+        title = input("Enter a title for the new file: ")
+        # Create a new temporary file.
+        tmp = tempfile.NamedTemporaryFile(delete=False)
+        # Open the temporary file with the default editor, or with nano.
+        os.system('"${EDITOR:-nano}" ' + tmp.name)
+        __sessions__.new(tmp.name)
+        __sessions__.current.file.name = title
+        print_info("New file with title \"{0}\" added to the current session".format(bold(title)))
+
+    ##
+    # OPEN
+    #
+    # This command is used to open a session on a given file.
+    # It either can be an external file path, or a SHA256 hash of a file which
+    # has been previously imported and stored.
+    # While the session is active, every operation and module executed will be
+    # run against the file specified.
+    def cmd_open(self, *args):
+        parser = argparse.ArgumentParser(prog='open', description="Open a file", epilog="You can also specify a MD5 or SHA256 hash to a previously stored file in order to open a session on it.")
+        group = parser.add_mutually_exclusive_group()
+        group.add_argument('-f', '--file', action='store_true', help="Target is a file")
+        group.add_argument('-u', '--url', action='store_true', help="Target is a URL")
+        group.add_argument('-l', '--last', action='store_true', help="Target is the entry number from the last find command's results")
+        parser.add_argument('-t', '--tor', action='store_true', help="Download the file through Tor")
+        parser.add_argument("value", metavar='PATH, URL, HASH or ID', nargs='*', help="Target to open. Hash can be md5 or sha256. ID has to be from the last search.")
+
+        try:
+            args = parser.parse_args(args)
+        except:
+            return
+
+        target = " ".join(args.value)
+
+        if not args.last and target is None:
+            parser.print_usage()
+            return
+
+        # If it's a file path, open a session on it.
+        if args.file:
+            target = os.path.expanduser(target)
+
+            if not os.path.exists(target) or not os.path.isfile(target):
+                self.log('error', "File not found: {0}".format(target))
+                return
+
+            __sessions__.new(target)
+        # If it's a URL, download it and open a session on the temporary file.
+        elif args.url:
+            data = download(url=target, tor=args.tor)
+
+            if data:
+                tmp = tempfile.NamedTemporaryFile(delete=False)
+                tmp.write(data)
+                tmp.close()
+
+                __sessions__.new(tmp.name)
+        # Try to open the specified file from the list of results from
+        # the last find command.
+        elif args.last:
+            if __sessions__.find:
+                count = 1
+                for item in __sessions__.find:
+                    if count == int(target):
+                        __sessions__.new(get_sample_path(item.sha256))
+                        break
+
+                    count += 1
+            else:
+                self.log('warning', "You haven't performed a find yet")
+        # Otherwise we assume it's an hash of an previously stored sample.
+        else:
+            target = target.strip().lower()
+
+            if len(target) == 32:
+                key = 'md5'
+            elif len(target) == 64:
+                key = 'sha256'
+            else:
+                parser.print_usage()
+                return
+
+            rows = self.db.find(key=key, value=target)
+
+            if not rows:
+                self.log('warning', "No file found with the given hash {0}".format(target))
+                return
+
+            path = get_sample_path(rows[0].sha256)
+            if path:
+                __sessions__.new(path)
+
+    ##
+    # CLOSE
+    #
+    # This command resets the open session.
+    # After that, all handles to the opened file should be closed and the
+    # shell should be restored to the default prompt.
+    def cmd_close(self, *args):
+        __sessions__.close()
+
+    ##
+    # INFO
+    #
+    # This command returns information on the open session. It returns details
+    # on the file (e.g. hashes) and other information that might available from
+    # the database.
+    def cmd_info(self, *args):
+        if __sessions__.is_set():
+            self.log('table', dict(
+                header=['Key', 'Value'],
+                rows=[
+                    ['Name', __sessions__.current.file.name],
+                    ['Tags', __sessions__.current.file.tags],
+                    ['Path', __sessions__.current.file.path],
+                    ['Size', __sessions__.current.file.size],
+                    ['Type', __sessions__.current.file.type],
+                    ['Mime', __sessions__.current.file.mime],
+                    ['MD5', __sessions__.current.file.md5],
+                    ['SHA1', __sessions__.current.file.sha1],
+                    ['SHA256', __sessions__.current.file.sha256],
+                    ['SHA512', __sessions__.current.file.sha512],
+                    ['SSdeep', __sessions__.current.file.ssdeep],
+                    ['CRC32', __sessions__.current.file.crc32]
+                ]
+            ))
+
+    ##
+    # NOTES
+    #
+    # This command allows you to view, add, modify and delete notes associated
+    # with the current investigation.
+    def cmd_notes(self, *args):
+        parser = argparse.ArgumentParser(prog="notes", description="Show information on the current investigation")
+        group = parser.add_mutually_exclusive_group()
+        group.add_argument('-l', '--list', action='store_true', help="List all notes available for the current investigation")
+        group.add_argument('-a', '--add', action='store_true', help="Add a new note to the current investigation")
+        group.add_argument('-v', '--view', metavar='NOTE', help="View the specified note")
+        group.add_argument('-e', '--edit', metavar='NOTE', type=int, help="Edit an existing note")
+        group.add_argument('-d', '--delete', metavar='NOTE', type=int, help="Delete an existing note")
+
+        notepath = __project__.path + '/notes'
+        notelist = os.listdir(__project__.path + '/notes')
+
+        try:
+            args = parser.parse_args(args)
+        except:
+            return
+
+        if __project__.name is None:
+            print_error('Cannot store notes in the default investigation. Please open a new case.')
+            return
+
+        if args.list:
+            # Retrieve all notes for the currently opened investigation.
+            pass
+
+            if len(notelist) < 1:
+                self.log('info', "No notes available for this investigation yet")
+                return
+
+            # Build table of existing case notes
+            rows = []
+            notecount = 1
+            for note in notelist:
+                rows.append([notecount, note])
+                notecount += 1
+
+            # Display list of existing notes.
+            self.log('table', dict(header=['ID', 'Title'], rows=rows))
+
+        elif args.add:
+            title = input("Enter a title for the new note: ")
+
+            # Create a new temporary file.
+            tmp = tempfile.NamedTemporaryFile(delete=False)
+            # Open the temporary file with the default editor, or with nano.
+            os.system('"${EDITOR:-nano}" ' + tmp.name)
+            # Once the user is done editing, we need to read the content and
+            # store it in the database.
+            body = tmp.read()
+            # store note in a file
+            with open(notepath + '/' + title, 'w+') as note:
+                note.write(body)
+
+            # store note in the database
+
+            # Finally, remove the temporary file.
+            os.remove(tmp.name)
+
+            self.log('info', "Note with title \"{0}\" added to the current investigation".format(bold(title)))
+
+        elif args.view:
+            # Retrieve note wth the specified ID and print it.
+            title = args.view
+            note = notepath + '/' + title
+            if os.path.exists(note):
+                self.log('info', bold('Title: ') + title)
+                try:
+                    with open(note, 'r') as notehndle:
+                        self.log('info', bold('Body:') + '\n' + notehndle.read())
+                except IOError:
+                    print_error("Could not open note by title {0}".format(title))
+            else:
+                self.log('info', "There is no note with title {0}".format(args.view))
+
+        elif args.edit:
+            # Retrieve note with the specified ID.
+            note = Database().get_note(args.edit)
+            if note:
+                # Create a new temporary file.
+                tmp = tempfile.NamedTemporaryFile(delete=False)
+                # Write the old body to the temporary file.
+                tmp.write(note.body)
+                tmp.close()
+                # Open the old body with the text editor.
+                os.system('"${EDITOR:-nano}" ' + tmp.name)
+                # Read the new body from the temporary file.
+                body = open(tmp.name, 'r').read()
+                # Update the note entry with the new body.
+                Database().edit_note(args.edit, body)
+                # Remove the temporary file.
+                os.remove(tmp.name)
+
+                self.log('info', "Updated note with ID {0}".format(args.edit))
+
+        elif args.delete:
+            # Delete the note with the specified ID.
+            Database().delete_note(args.delete)
+        else:
+            parser.print_usage()
+
+    ##
+    # STORE
+    #
+    # This command stores the opened file in the local repository and tries
+    # to store details in the database.
+    def cmd_store(self, *args):
+        parser = argparse.ArgumentParser(prog='store', description="Store the opened file in the current investigation")
+        parser.add_argument('-d', '--delete', action='store_true', help="Delete the original file")
+        parser.add_argument('-f', '--folder', type=str, nargs='+', help="Specify a folder to import")
+        parser.add_argument('-s', '--file-size', type=int, help="Specify a maximum file size")
+        parser.add_argument('-y', '--file-type', type=str, help="Specify a file type pattern")
+        parser.add_argument('-n', '--file-name', type=str, help="Specify a file name pattern")
+        parser.add_argument('-t', '--tags', type=str, nargs='+', help="Specify a list of comma-separated tags")
+
+        try:
+            args = parser.parse_args(args)
+        except:
+            return
+
+        if args.folder is not None:
+            # Allows to have spaces in the path.
+            args.folder = " ".join(args.folder)
+
+        if args.tags is not None:
+            # Remove the spaces in the list of tags
+            args.tags = "".join(args.tags)
+
+        def add_file(obj, tags=None):
+            if get_sample_path(obj.sha256):
+                self.log('warning', "Skip, file \"{0}\" appears to be already stored".format(obj.name))
+                return False
+
+            if __project__.name:
+                pass
+            else:
+                print_error("Must open an investigation to store files")
+                return False
+
+            # Try to store file object into database.
+            status = self.db.add(obj=obj, tags=tags)
+            if status:
+                # If succeeds, store also in the local repository.
+                # If something fails in the database (for example unicode strings)
+                # we don't want to have the binary lying in the repository with no
+                # associated database record.
+                new_path = store_sample(obj)
+                self.log("success", "Stored file \"{0}\" to {1}".format(obj.name, new_path))
+            else:
+                return False
+
+            # Delete the file if requested to do so.
+            if args.delete:
+                try:
+                    os.unlink(obj.path)
+                except Exception as e:
+                    self.log('warning', "Failed deleting file: {0}".format(e))
+
+            return True
+
+        # If the user specified the --folder flag, we walk recursively and try
+        # to add all contained files to the local repository.
+        # This is not going to open a new session.
+        # TODO: perhaps disable or make recursion optional?
+        if args.folder is not None:
+            # Check if the specified folder is valid.
+            if os.path.isdir(args.folder):
+                # Walk through the folder and subfolders.
+                for dir_name, dir_names, file_names in walk(args.folder):
+                    # Add each collected file.
+                    for file_name in file_names:
+                        file_path = os.path.join(dir_name, file_name)
+
+                        if not os.path.exists(file_path):
+                            continue
+                        # Check if file is not zero.
+                        if not os.path.getsize(file_path) > 0:
+                            continue
+
+                        # Check if the file name matches the provided pattern.
+                        if args.file_name:
+                            if not fnmatch.fnmatch(file_name, args.file_name):
+                                # self.log('warning', "Skip, file \"{0}\" doesn't match the file name pattern".format(file_path))
+                                continue
+
+                        # Check if the file type matches the provided pattern.
+                        if args.file_type:
+                            if args.file_type not in File(file_path).type:
+                                # self.log('warning', "Skip, file \"{0}\" doesn't match the file type".format(file_path))
+                                continue
+
+                        # Check if file exceeds maximum size limit.
+                        if args.file_size:
+                            # Obtain file size.
+                            if os.path.getsize(file_path) > args.file_size:
+                                self.log('warning', "Skip, file \"{0}\" is too big".format(file_path))
+                                continue
+
+                        file_obj = File(file_path)
+
+                        # Add file.
+                        add_file(file_obj, args.tags)
+            else:
+                self.log('error', "You specified an invalid folder: {0}".format(args.folder))
+        # Otherwise we try to store the currently opened file, if there is any.
+        else:
+            if __sessions__.is_set():
+                if __sessions__.current.file.size == 0:
+                    self.log('warning', "Skip, file \"{0}\" appears to be empty".format(__sessions__.current.file.name))
+                    return False
+
+                # Add file.
+                if add_file(__sessions__.current.file, args.tags):
+                    # Open session to the new file.
+                    self.cmd_open(*[__sessions__.current.file.sha256])
+            else:
+                self.log('error', "No session opened")
+
+    ##
+    # DELETE
+    #
+    # This commands deletes the currenlty opened file (only if it's stored in
+    # the local repository) and removes the details from the database
+    def cmd_delete(self, *args):
+        if __sessions__.is_set():
+            while True:
+                choice = input("Are you sure you want to delete this binary? Can't be reverted! [y/n] ")
+                if choice == 'y':
+                    break
+                elif choice == 'n':
+                    return
+
+            rows = self.db.find('sha256', __sessions__.current.file.sha256)
+            if rows:
+                malware_id = rows[0].id
+                if self.db.delete_file(malware_id):
+                    self.log("success", "File deleted")
+                else:
+                    self.log('error', "Unable to delete file")
+
+            os.remove(__sessions__.current.file.path)
+            __sessions__.close()
+        else:
+            self.log('error', "No session opened")
+
+    ##
+    # FIND
+    #
+    # This command is used to search for files in the database.
+    def cmd_find(self, *args):
+        parser = argparse.ArgumentParser(prog='find', description="Find a file")
+        group = parser.add_mutually_exclusive_group()
+        group.add_argument('-t', '--tags', action='store_true', help="List available tags and quit")
+        group.add_argument('type', nargs='?', choices=["all", "latest", "name", "type", "mime", "md5", "sha256", "tag", "note"], help="Where to search.")
+        parser.add_argument("value", nargs='?', help="String to search.")
+        try:
+            args = parser.parse_args(args)
+        except:
+            return
+
+        # One of the most useful search terms is by tag. With the --tags
+        # argument we first retrieve a list of existing tags and the count
+        # of files associated with each of them.
+        if args.tags:
+            # Retrieve list of tags.
+            tags = self.db.list_tags()
+
+            if tags:
+                rows = []
+                # For each tag, retrieve the count of files associated with it.
+                for tag in tags:
+                    count = len(self.db.find('tag', tag.tag))
+                    rows.append([tag.tag, count])
+
+                # Generate the table with the results.
+                header = ['Tag', '# Entries']
+                rows.sort(key=lambda x: x[1], reverse=True)
+                self.log('table', dict(header=header, rows=rows))
+            else:
+                self.log('warning', "No tags available")
+
+            return
+
+        # At this point, if there are no search terms specified, return.
+        if args.type is None:
+            parser.print_usage()
+            return
+
+        key = args.type
+        if key != 'all' and key != 'latest':
+            try:
+                # The second argument is the search value.
+                value = args.value
+            except IndexError:
+                self.log('error', "You need to include a search term.")
+                return
+        else:
+            value = None
+
+        # Search all the files matching the given parameters.
+        items = self.db.find(key, value)
+        if not items:
+            return
+
+        # Populate the list of search results.
+        rows = []
+        count = 1
+        for item in items:
+            tag = ', '.join([t.tag for t in item.tag if t.tag])
+            row = [count, item.name, item.mime, item.md5, tag]
+            if key == 'latest':
+                row.append(item.created_at)
+
+            rows.append(row)
+            count += 1
+
+        # Update find results in current session.
+        __sessions__.find = items
+
+        # Generate a table with the results.
+        header = ['#', 'Name', 'Mime', 'MD5', 'Tags']
+        if key == 'latest':
+            header.append('Created At')
+
+        self.log("table", dict(header=header, rows=rows))
+
+    ##
+    # TAGS
+    #
+    # This command is used to modify the tags of the opened file.
+    def cmd_tags(self, *args):
+        parser = argparse.ArgumentParser(prog='tags', description="Modify tags of the opened file")
+        parser.add_argument('-a', '--add', metavar='TAG', help="Add tags to the opened file (comma separated)")
+        parser.add_argument('-d', '--delete', metavar='TAG', help="Delete a tag from the opened file")
+        try:
+            args = parser.parse_args(args)
+        except:
+            return
+
+        # This command requires a session to be opened.
+        if not __sessions__.is_set():
+            self.log('error', "No session opened")
+            parser.print_usage()
+            return
+
+        # If no arguments are specified, there's not much to do.
+        # However, it could make sense to also retrieve a list of existing
+        # tags from this command, and not just from the "find" command alone.
+        if args.add is None and args.delete is None:
+            parser.print_usage()
+            return
+
+        # TODO: handle situation where addition or deletion of a tag fail.
+
+        db = Database()
+        if not db.find(key='sha256', value=__sessions__.current.file.sha256):
+            self.log('error', "The opened file is not stored in the database. "
+                "If you want to add it use the `store` command.")
+            return
+
+        if args.add:
+            # Add specified tags to the database's entry belonging to
+            # the opened file.
+            db.add_tags(__sessions__.current.file.sha256, args.add)
+            self.log('info', "Tags added to the currently opened file")
+
+            # We refresh the opened session to update the attributes.
+            # Namely, the list of tags returned by the 'info' command
+            # needs to be re-generated, or it wouldn't show the new tags
+            # until the existing session is closed a new one is opened.
+            self.log('info', "Refreshing session to update attributes...")
+            __sessions__.new(__sessions__.current.file.path)
+
+        if args.delete:
+            # Delete the tag from the database.
+            db.delete_tag(args.delete, __sessions__.current.file.sha256)
+            # Refresh the session so that the attributes of the file are
+            # updated.
+            self.log('info', "Refreshing session to update attributes...")
+            __sessions__.new(__sessions__.current.file.path)
+
+    ###
+    # SESSION
+    #
+    # This command is used to list and switch across all the opened sessions.
+    def cmd_sessions(self, *args):
+        parser = argparse.ArgumentParser(prog='sessions', description="Open a file", epilog="List or switch sessions")
+        group = parser.add_mutually_exclusive_group()
+        group.add_argument('-l', '--list', action='store_true', help="List all existing sessions")
+        group.add_argument('-s', '--switch', type=int, help="Switch to the specified session")
+
+        try:
+            args = parser.parse_args(args)
+        except:
+            return
+
+        if args.list:
+            if not __sessions__.sessions:
+                self.log('info', "There are no opened sessions")
+                return
+
+            rows = []
+            for session in __sessions__.sessions:
+                current = ''
+                if session == __sessions__.current:
+                    current = 'Yes'
+
+                rows.append([
+                    session.id,
+                    session.file.name,
+                    session.file.md5,
+                    session.created_at,
+                    current
+                ])
+
+            self.log('info', "Opened Sessions:")
+            self.log("table", dict(header=['#', 'Name', 'MD5', 'Created At', 'Current'], rows=rows))
+        elif args.switch:
+            for session in __sessions__.sessions:
+                if args.switch == session.id:
+                    __sessions__.switch(session)
+                    return
+
+            self.log('warning', "The specified session ID doesn't seem to exist")
+        else:
+            parser.print_usage()
+
+    ##
+    # INVESTIGATIONS
+    #
+    # This command retrieves a list of all projects.
+    # You can also switch to a different project.
+    def cmd_investigations(self, *args):
+        parser = argparse.ArgumentParser(prog='investigations', description="Open a case", epilog="List or switch current investigations")
+        group = parser.add_mutually_exclusive_group()
+        group.add_argument('-l', '--list', action='store_true', help="List all existing investigations")
+        group.add_argument('-s', '--switch', metavar='NAME', help="Switch to the specified investigation")
+        group.add_argument('-d', '--delete', type=int, metavar='ID', help="delete investigation by id.")
+
+        try:
+            args = parser.parse_args(args)
+        except:
+            return
+
+        projects_path = os.path.join(os.getcwd(), 'investigations')
+
+        if not os.path.exists(projects_path):
+            self.log('info', "The investigations directory does not exist yet")
+            return
+
+        if args.list:
+            self.log('info', "Current Investigations:")
+            rows = []
+            items = self.db.get_investigation_list()
+
+            # Populate the list of search results.
+            count = 1
+            for item in items:
+                row = [item.id, item.name]
+                rows.append(row)
+
+            self.log('table', dict(header=['ID', 'Name'], rows=rows))
+        elif args.switch:
+            if __sessions__.is_set():
+                __sessions__.close()
+                self.log('info', "Closed opened session")
+
+            __project__.open(args.switch, self.db)
+            self.log('info', "Switched to investigation {0}".format(bold(args.switch)))
+
+            # Need to re-initialize the Database to open the new SQLite file.
+            self.db = Database()
+        elif args.delete:
+            if __sessions__.is_set():
+                __sessions__.close()
+                self.log('info', "Closed opened session")
+
+            __project__.delete(args.delete, self.db)
+            self.log('info', "Deleted investigation {0}".format(bold(args.delete)))
+
+            # Need to re-initialize the Database to open the new SQLite file.
+            self.db = Database()
+        else:
+            self.log('info', parser.print_usage())
+
+    ##
+    # EXPORT
+    #
+    # This command will export the current session to file or zip.
+    def cmd_export(self, *args):
+        parser = argparse.ArgumentParser(prog='export', description="Export the current session to file or zip")
+        parser.add_argument('-z', '--zip', action='store_true', help="Export session in a zip archive")
+        parser.add_argument('value', help="path or archive name")
+
+        try:
+            args = parser.parse_args(args)
+        except:
+            return
+
+        # This command requires a session to be opened.
+        if not __sessions__.is_set():
+            self.log('error', "No session opened")
+            parser.print_usage()
+            return
+
+        # Check for valid export path.
+        if args.value is None:
+            parser.print_usage()
+            return
+
+        # TODO: having for one a folder and for the other a full
+        # target path can be confusing. We should perhaps standardize this.
+
+        # Abort if the specified path already exists.
+        if os.path.isfile(args.value):
+            self.log('error', "File at path \"{0}\" already exists, abort".format(args.value))
+            return
+
+        # If the argument chosed so, archive the file when exporting it.
+        # TODO: perhaps add an option to use a password for the archive
+        # and default it to "infected".
+        if args.zip:
+            try:
+                with ZipFile(args.value, 'w') as export_zip:
+                    export_zip.write(__sessions__.current.file.path, arcname=__sessions__.current.file.name)
+            except IOError as e:
+                self.log('error', "Unable to export file: {0}".format(e))
+            else:
+                self.log('info', "File archived and exported to {0}".format(args.value))
+        # Otherwise just dump it to the given directory.
+        else:
+            # XXX: Export file with the original file name.
+            store_path = os.path.join(args.value, __sessions__.current.file.name)
+
+            try:
+                shutil.copyfile(__sessions__.current.file.path, store_path)
+            except IOError as e:
+                self.log('error', "Unable to export file: {0}".format(e))
+            else:
+                self.log('info', "File exported to {0}".format(store_path))
+                
+    ##
+    # Stats
+    #
+    # This command allows you to generate basic statistics for the stored files.
+    def cmd_stats(self, *args):
+        parser = argparse.ArgumentParser(prog='stats', description="Display Database File Statistics")
+        parser.add_argument('-t', '--top', type=int, help='Top x Items')
+
+        try:
+            args = parser.parse_args(args)
+        except:
+            return
+
+
+        arg_top = args.top
+        db = Database()
+
+        # Set all Counters Dict
+        extension_dict = defaultdict(int)
+        mime_dict = defaultdict(int)
+        tags_dict = defaultdict(int)
+        size_list = []
+        
+        # Find all
+        items = self.db.find('all')
+        
+        if len(items) < 1:
+            self.log('info', "No items in database to generate stats")
+            return
+        
+        # Sort in to stats
+        for item in items:
+            if '.' in item.name:
+                ext = item.name.split('.')
+                extension_dict[ext[-1]] += 1
+            mime_dict[item.mime] += 1
+            size_list.append(item.size)
+            for t in item.tag:
+                if t.tag:
+                    tags_dict[t.tag] += 1
+        
+        avg_size = sum(size_list) / len(size_list)
+        all_stats = {'Total':len(items), 'File Extension':extension_dict, 'Mime':mime_dict, 'Tags':tags_dict, 'Avg Size':avg_size, 'Largest':max(size_list), 'Smallest':min(size_list)}
+
+        # Counter for top x
+        if arg_top:
+            counter = arg_top
+            prefix = 'Top {0} '.format(counter)
+        else:
+            counter = len(items)
+            prefix = ''
+        
+        # Project Stats Last as i have it iterate them all
+        
+        # Print all the results
+        
+        self.log('info', "Projects")
+        self.log('table', dict(header=['Name', 'Count'], rows=[['Main', len(items)], ['Next', '10']]))
+        
+        # For Current Project
+        self.log('info', "Current Project")
+        
+        # Extension
+        self.log('info', "{0}Extensions".format(prefix))
+        header = ['Ext', 'Count']
+        rows = []
+
+        for k in sorted(extension_dict, key=extension_dict.get, reverse=True)[:counter]:
+            rows.append([k, extension_dict[k]])
+        self.log('table', dict(header=header, rows=rows))
+        
+        
+        # Mimes
+        self.log('info', "{0}Mime Types".format(prefix))
+        header = ['Mime', 'Count']
+        rows = []
+        for k in sorted(mime_dict, key=mime_dict.get, reverse=True)[:counter]:
+            rows.append([k, mime_dict[k]])
+        self.log('table', dict(header=header, rows=rows))
+        
+        # Tags
+        self.log('info', "{0}Tags".format(prefix))
+        header = ['Tag', 'Count']
+        rows = []
+        for k in sorted(tags_dict, key=tags_dict.get, reverse=True)[:counter]:
+            rows.append([k, tags_dict[k]])
+        self.log('table', dict(header=header, rows=rows))
+        
+        # Size
+        self.log('info', "Size Stats")
+        self.log('item', "Largest  {0}".format(convert_size(max(size_list))))
+        self.log('item', "Smallest  {0}".format(convert_size(min(size_list))))
+        self.log('item', "Average  {0}".format(convert_size(avg_size)))
+                
