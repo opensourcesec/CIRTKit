@@ -32,6 +32,8 @@ malware_investigation = Table(
     Column('malware_id', Integer, ForeignKey('malware.id'))
 )
 
+DB_USER = 'admin'
+DB_PASSWD = 'admin'
 
 class Malware(Base):
     __tablename__ = 'malware'
@@ -209,7 +211,7 @@ class Database:
             db_path = path.join(__project__.get_path(), DB_NAME)
 
         # Connect to Postgres DB
-        self.engine = create_engine('postgresql+psycopg2://admin:admin!@localhost/cirtkit')
+        self.engine = create_engine('postgresql+psycopg2://{0}:{1}!@localhost/cirtkit'.format(DB_USER, DB_PASSWD))
 
         self.engine.echo = False
         self.engine.pool_timeout = 60
