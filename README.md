@@ -1,7 +1,6 @@
 ![CIRTKit](data/img/cirtkit_logo.png)
 
-Incident Response Framework
-<i>One console to rule them all</i>
+<i>One DFIR console to rule them all</i>
 <hr />
 
 ## Documentation
