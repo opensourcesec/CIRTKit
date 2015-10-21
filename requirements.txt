@@ -10,8 +10,6 @@ psycopg2
 ### Module requirements
 #########################
 
-pycrypto
-#pysqlcipher
 olefile
 oletools
 BeautifulSoup4
@@ -22,7 +20,6 @@ bitstring
 dnspython
 git+https://github.com/smarnach/pyexiftool.git#egg=pyexiftool
 pyasn1
-M2Crypto
 pymisp
 django
 pypssl
@@ -36,7 +33,6 @@ http://pefile.googlecode.com/files/pefile-1.2.10-139.tar.gz#egg=pefile
 ### Integration requirements
 ##############################
 
-# Carbonblack
 simplejson
 pyaml
 
