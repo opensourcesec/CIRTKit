@@ -15,6 +15,8 @@
 ### Future modules
 * Packet Analysis (possibly Dshell)
 * Javascript Unpacking/Deobfuscation
+* Volatility Memory Analysis Framework
+* Hex Viewer/Editor
 
 ### Scripting Framework
 * Automation is key. Scripting is key to DFIR, thus needs to be available in CIRTKit
