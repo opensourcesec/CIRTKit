@@ -27,7 +27,6 @@ pypdns
 scandir
 pype32
 pbkdf2
-pydeep
 http://pefile.googlecode.com/files/pefile-1.2.10-139.tar.gz#egg=pefile
 
 ### Integration requirements
