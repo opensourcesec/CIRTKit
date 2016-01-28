@@ -13,6 +13,7 @@ def load_modules():
     import modules
 
     moduleDict = dict()
+    integrationDict = dict()
 
     # Walk recursively through all modules and packages.
     for loader, module_name, ispkg in pkgutil.walk_packages(modules.__path__, modules.__name__ + '.'):
@@ -34,7 +35,7 @@ def load_modules():
                     # Yield the class if it's a subclass of Module.
                     if issubclass(member_object, Module) and member_object is not Module:
                         moduleDict[member_object.cmd] = dict(obj=member_object, description=member_object.description)
-
+                    
     return moduleDict
 
 
