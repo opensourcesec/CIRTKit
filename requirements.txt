@@ -1,6 +1,6 @@
 ### Framework requirements
 ############################
-
+colorama
 python-magic
 PrettyTable
 requests
