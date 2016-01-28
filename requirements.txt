@@ -34,6 +34,3 @@ http://pefile.googlecode.com/files/pefile-1.2.10-139.tar.gz#egg=pefile
 
 simplejson
 pyaml
-
-### Script requirements
-#########################
