@@ -2,7 +2,7 @@
 
 <i>One DFIR console to rule them all</i>
 <hr />
-
+[![Build Status](https://travis-ci.org/byt3smith/CIRTKit.svg?branch=master)](https://travis-ci.org/byt3smith/CIRTKit)
 ## Documentation
 * Please see the [wiki](https://github.com/byt3smith/CIRTKit/wiki) for more information about CIRTKit and documentation
 
