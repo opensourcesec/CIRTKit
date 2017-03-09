@@ -1,6 +1,6 @@
 ![CIRTKit](data/img/cirtkit_logo.png)
 
-<i>One DFIR console to rule them all</i>
+<i>One DFIR console to rule them all. Built on top of the [Viper Framework](https://github.com/viper-framework/viper)</i>
 <hr />
 [![Build Status](https://travis-ci.org/byt3smith/CIRTKit.svg?branch=master)](https://travis-ci.org/byt3smith/CIRTKit)
 ## Documentation
