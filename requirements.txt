@@ -18,7 +18,6 @@ pylzma
 pyelftools
 bitstring
 dnspython
-git+https://github.com/smarnach/pyexiftool.git#egg=pyexiftool
 pyasn1
 pymisp
 django
@@ -27,7 +26,9 @@ pypdns
 scandir
 pype32
 pbkdf2
-http://pefile.googlecode.com/files/pefile-1.2.10-139.tar.gz#egg=pefile
+pycrypto
+https://github.com/erocarrera/pefile/files/192316/pefile-2016.3.28.tar.gz#egg=pefile
+git+https://github.com/smarnach/pyexiftool.git#egg=pyexiftool
 
 ### Integration requirements
 ##############################
