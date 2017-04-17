@@ -27,7 +27,7 @@ pypdns
 scandir
 pype32
 pbkdf2
-git+https://github.com/erocarrera/pefile/files/192316/pefile-2016.3.28.tar.gz#egg=pefile
+git+https://github.com/erocarrera/pefile.git#egg=pefile
 
 ### Integration requirements
 ##############################
