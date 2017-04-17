@@ -26,6 +26,7 @@ pypdns
 scandir
 pype32
 pbkdf2
+pycrypto
 https://github.com/erocarrera/pefile/files/192316/pefile-2016.3.28.tar.gz#egg=pefile
 git+https://github.com/smarnach/pyexiftool.git#egg=pyexiftool
 
